@@ -108,6 +108,8 @@ const PROVIDER_DISPLAY: Record<string, { order: number; title: string }> = {
   'qwen-oauth': { order: 5, title: 'Qwen Code' }
 }
 
+const assetPath = (path: string) => `${import.meta.env.BASE_URL}${path.replace(/^\/+/, '')}`
+
 const FLOW_SUBTITLES: Record<OAuthProvider['flow'], string> = {
   pkce: 'Opens your browser to sign in, then continues here',
   device_code: 'Opens a verification page in your browser — Hermes connects automatically',
@@ -333,7 +335,7 @@ function FeaturedProviderRow({
     >
       <div className="min-w-0">
         <div className="flex items-center gap-2">
-          <img alt="" className="size-5 shrink-0 rounded" src="/apple-touch-icon.png" />
+          <img alt="" className="size-5 shrink-0 rounded" src={assetPath('apple-touch-icon.png')} />
           <span className="text-base font-semibold">{providerTitle(provider)}</span>
           {loggedIn ? (
             <ConnectedTag />

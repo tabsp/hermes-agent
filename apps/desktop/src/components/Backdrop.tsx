@@ -21,6 +21,7 @@ const BLEND_MODES = [
 ] as const
 
 type BlendMode = (typeof BLEND_MODES)[number]
+const assetPath = (path: string) => `${import.meta.env.BASE_URL}${path.replace(/^\/+/, '')}`
 
 export function Backdrop() {
   const [controlsOpen, setControlsOpen] = useState(false)
@@ -99,7 +100,7 @@ export function Backdrop() {
             alt=""
             className="w-auto min-w-dvw object-cover"
             fetchPriority="low"
-            src="/ds-assets/filler-bg0.jpg"
+            src={assetPath('ds-assets/filler-bg0.jpg')}
             style={{
               height: `${statue.scale}dvh`,
               objectPosition: statue.objectPosition,
