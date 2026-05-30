@@ -71,8 +71,13 @@ USE_VENV=true
 RUN_SETUP=true
 SKIP_BROWSER=false
 BRANCH="main"
+INSTALL_COMMIT=""
 ENSURE_DEPS=""
 POSTINSTALL_MODE=false
+MANIFEST_MODE=false
+STAGE_NAME=""
+JSON_OUTPUT=false
+NON_INTERACTIVE=false
 
 # Detect non-interactive mode (e.g. curl | bash)
 # When stdin is not a terminal, read -p will fail with EOF,
@@ -102,6 +107,26 @@ while [[ $# -gt 0 ]]; do
             BRANCH="$2"
             shift 2
             ;;
+        --commit)
+            INSTALL_COMMIT="$2"
+            shift 2
+            ;;
+        --manifest|-Manifest)
+            MANIFEST_MODE=true
+            shift
+            ;;
+        --stage|-Stage)
+            STAGE_NAME="$2"
+            shift 2
+            ;;
+        --json|-Json)
+            JSON_OUTPUT=true
+            shift
+            ;;
+        --non-interactive|-NonInteractive)
+            NON_INTERACTIVE=true
+            shift
+            ;;
         --dir)
             INSTALL_DIR="$2"
             INSTALL_DIR_EXPLICIT=true
@@ -129,6 +154,11 @@ while [[ $# -gt 0 ]]; do
             echo "  --skip-setup   Skip interactive setup wizard"
             echo "  --skip-browser Skip Playwright/Chromium install (browser tools won't work)"
             echo "  --branch NAME  Git branch to install (default: main)"
+            echo "  --commit SHA   Pin checkout to a specific commit after clone/update"
+            echo "  --manifest     Print desktop bootstrap stage manifest as JSON"
+            echo "  --stage NAME   Run one desktop bootstrap stage"
+            echo "  --json         Print a JSON result frame for --stage"
+            echo "  --non-interactive  Skip stages that require user input"
             echo "  --dir PATH     Installation directory"
             echo "                   default (non-root):  ~/.hermes/hermes-agent"
             echo "                   default (root, Linux): /usr/local/lib/hermes-agent"
@@ -189,6 +219,41 @@ log_error() {
     echo -e "${RED}✗${NC} $1"
 }
 
+json_escape() {
+    # Enough for short installer status strings; avoids requiring jq during
+    # pre-install bootstrap.
+    printf '%s' "$1" | tr '\n' ' ' | sed \
+        -e 's/\\/\\\\/g' \
+        -e 's/"/\\"/g'
+}
+
+emit_manifest() {
+    cat <<'JSON'
+{"protocol_version":1,"stages":[{"name":"prerequisites","title":"System prerequisites","category":"runtime","needs_user_input":false},{"name":"repository","title":"Download Hermes Agent","category":"runtime","needs_user_input":false},{"name":"venv","title":"Create Python virtual environment","category":"runtime","needs_user_input":false},{"name":"python-deps","title":"Install Python dependencies","category":"runtime","needs_user_input":false},{"name":"node-deps","title":"Install browser-tool dependencies","category":"runtime","needs_user_input":false},{"name":"path","title":"Install hermes command","category":"runtime","needs_user_input":false},{"name":"config","title":"Prepare config and skills","category":"configuration","needs_user_input":false},{"name":"setup","title":"Configure API keys and settings","category":"configuration","needs_user_input":true},{"name":"gateway","title":"Configure gateway service","category":"configuration","needs_user_input":true},{"name":"complete","title":"Finish install","category":"runtime","needs_user_input":false}]}
+JSON
+}
+
+stage_needs_user_input() {
+    case "$1" in
+        setup|gateway) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+emit_stage_json() {
+    local stage="$1"
+    local ok="$2"
+    local skipped="${3:-false}"
+    local reason="${4:-}"
+    local escaped_reason
+    escaped_reason="$(json_escape "$reason")"
+    if [ -n "$escaped_reason" ]; then
+        printf '{"ok":%s,"stage":"%s","skipped":%s,"reason":"%s"}\n' "$ok" "$stage" "$skipped" "$escaped_reason"
+    else
+        printf '{"ok":%s,"stage":"%s","skipped":%s}\n' "$ok" "$stage" "$skipped"
+    fi
+}
+
 prompt_yes_no() {
     local question="$1"
     local default="${2:-yes}"
@@ -201,7 +266,9 @@ prompt_yes_no() {
         *) prompt_suffix="[y/N]" ;;
     esac
 
-    if [ "$IS_INTERACTIVE" = true ]; then
+    if [ "$NON_INTERACTIVE" = true ]; then
+        answer=""
+    elif [ "$IS_INTERACTIVE" = true ]; then
         read -r -p "$question $prompt_suffix " answer || answer=""
     elif [ -r /dev/tty ] && [ -w /dev/tty ]; then
         printf "%s %s " "$question" "$prompt_suffix" > /dev/tty
@@ -985,6 +1052,14 @@ clone_repo() {
     fi
 
     cd "$INSTALL_DIR"
+
+    if [ -n "$INSTALL_COMMIT" ]; then
+        log_info "Pinning checkout to commit $INSTALL_COMMIT..."
+        if ! git cat-file -e "$INSTALL_COMMIT^{commit}" 2>/dev/null; then
+            git fetch origin "$INSTALL_COMMIT" || true
+        fi
+        git checkout --detach "$INSTALL_COMMIT"
+    fi
 
     log_success "Repository ready"
 }
@@ -2040,6 +2115,135 @@ postinstall_mode() {
     fi
 }
 
+# Each --stage runs in its own process, so (unlike the monolithic main() where
+# clone_repo cd's once and later steps inherit it) a stage that operates on the
+# checkout must cd into it explicitly. Without this, install_deps/setup_path run
+# from the desktop app's cwd and resolve `.` / the venv against the wrong tree.
+require_install_dir() {
+    if [ -z "$INSTALL_DIR" ] || [ ! -d "$INSTALL_DIR" ]; then
+        log_error "Install directory not found: ${INSTALL_DIR:-<unset>}"
+        log_info "The 'repository' stage must run before this one."
+        return 1
+    fi
+    cd "$INSTALL_DIR"
+}
+
+# Desktop bootstrap stage protocol. Mirrors the Windows install.ps1 surface
+# closely enough for the Electron bootstrap runner to show structured progress.
+run_stage_body() {
+    local stage="$1"
+
+    case "$stage" in
+        prerequisites)
+            print_banner
+            detect_os
+            resolve_install_layout
+            install_uv
+            check_python
+            check_git
+            check_node
+            check_network_prerequisites
+            install_system_packages
+            ;;
+        repository)
+            detect_os
+            resolve_install_layout
+            check_git
+            clone_repo
+            ;;
+        venv)
+            detect_os
+            resolve_install_layout
+            require_install_dir
+            install_uv
+            check_python
+            setup_venv
+            ;;
+        python-deps)
+            detect_os
+            resolve_install_layout
+            require_install_dir
+            install_uv
+            check_python
+            install_deps
+            ;;
+        node-deps)
+            detect_os
+            resolve_install_layout
+            require_install_dir
+            check_node
+            install_node_deps
+            ;;
+        path)
+            detect_os
+            resolve_install_layout
+            require_install_dir
+            setup_path
+            ;;
+        config)
+            detect_os
+            resolve_install_layout
+            require_install_dir
+            copy_config_templates
+            ;;
+        setup)
+            detect_os
+            resolve_install_layout
+            require_install_dir
+            run_setup_wizard
+            ;;
+        gateway)
+            detect_os
+            resolve_install_layout
+            require_install_dir
+            maybe_start_gateway
+            ;;
+        complete)
+            detect_os
+            resolve_install_layout
+            print_success
+            echo "git" > "$HERMES_HOME/.install_method"
+            ;;
+        *)
+            log_error "Unknown stage: $stage"
+            return 2
+            ;;
+    esac
+}
+
+run_stage_protocol() {
+    local stage="$1"
+    if [ -z "$stage" ]; then
+        log_error "--stage requires a stage name"
+        if [ "$JSON_OUTPUT" = true ]; then
+            emit_stage_json "" false false "missing stage name"
+        fi
+        return 2
+    fi
+
+    if [ "$NON_INTERACTIVE" = true ] && stage_needs_user_input "$stage"; then
+        log_info "Skipping $stage (non-interactive bootstrap)"
+        if [ "$JSON_OUTPUT" = true ]; then
+            emit_stage_json "$stage" true true
+        fi
+        return 0
+    fi
+
+    set +e
+    run_stage_body "$stage"
+    local code=$?
+    set -e
+
+    if [ "$JSON_OUTPUT" = true ]; then
+        if [ "$code" -eq 0 ]; then
+            emit_stage_json "$stage" true false
+        else
+            emit_stage_json "$stage" false false "exit code $code"
+        fi
+    fi
+    return "$code"
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -2070,7 +2274,11 @@ main() {
     echo "git" > "$HERMES_HOME/.install_method"
 }
 
-if [ -n "$ENSURE_DEPS" ]; then
+if [ "$MANIFEST_MODE" = true ]; then
+    emit_manifest
+elif [ -n "$STAGE_NAME" ]; then
+    run_stage_protocol "$STAGE_NAME"
+elif [ -n "$ENSURE_DEPS" ]; then
     ensure_mode
 elif [ "$POSTINSTALL_MODE" = true ]; then
     postinstall_mode

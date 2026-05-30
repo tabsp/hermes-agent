@@ -1447,43 +1447,15 @@ async function ensureRuntime(backend) {
   }
 
   // backend.kind === 'bootstrap-needed' means resolveHermesBackend couldn't
-  // find anything to spawn. Hand off to the bootstrap runner which drives
-  // install.ps1's stage protocol, writes the bootstrap-complete marker on
-  // success, then we re-resolve to get the now-installed backend.
+  // find anything to spawn. Hand off to the bootstrap runner which drives the
+  // platform installer, writes the bootstrap-complete marker on success, then
+  // we re-resolve to get the now-installed backend.
   //
   // Phase 1D status: bootstrap runs but events go to desktop.log only
   // (renderer window isn't created until later in startBackend). Phase 1E
   // will rewire startup to spawn the window first and route bootstrap events
   // to a renderer-side install overlay.
   if (backend.kind === 'bootstrap-needed') {
-    if (process.platform !== 'win32') {
-      // macOS/Linux: install.sh doesn't yet support the stage protocol that
-      // install.ps1 does, so we can't drive a first-launch bootstrap. Emit
-      // a platform-unsupported event so the renderer's install overlay can
-      // render a 'run install.sh manually' guide instead of a generic
-      // 'desktop boot failed' toast. Mark the bootstrap state as inactive
-      // with an explanatory error so the overlay's failure branch picks
-      // it up immediately. THEN throw -- so the existing 'desktop boot
-      // failed' path still trips and prevents the rest of startHermes
-      // from running against a missing install.
-      const guidanceUrl = 'https://github.com/NousResearch/hermes-agent#install'
-      const installShUrl = 'https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh'
-      try {
-        broadcastBootstrapEvent({
-          type: 'unsupported-platform',
-          platform: process.platform,
-          activeRoot: backend.activeRoot,
-          installCommand: `bash <(curl -fsSL ${installShUrl})`,
-          docsUrl: guidanceUrl
-        })
-      } catch {}
-      throw new Error(
-        `Hermes Agent is not installed at ${backend.activeRoot}. On macOS/Linux ` +
-          'first-launch install is not yet automated -- run scripts/install.sh ' +
-          'from the Hermes repo manually, then relaunch this app.'
-      )
-    }
-
     rememberLog('[bootstrap] no Hermes install found; starting first-launch bootstrap')
 
     // Eagerly flip the bootstrap UI state to 'active' so the renderer
